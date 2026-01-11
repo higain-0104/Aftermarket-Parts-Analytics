@@ -1,0 +1,123 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from mlxtend.frequent_patterns import apriori, association_rules
+from datetime import datetime, timedelta
+
+# --- Page Config ---
+st.set_page_config(page_title="Bobcat Strategic Aftermarket Dash", layout="wide")
+
+# --- 1. Advanced Data Generation ---
+@st.cache_data
+def generate_advanced_data():
+    np.random.seed(42)
+    # 1. Parts Master with Cost & Margin
+    parts_data = {
+        'Part_ID': ['P01', 'P02', 'P03', 'P04', 'P05', 'P06', 'P07', 'P08'],
+        'Part_Name': ['Engine Oil Filter', 'Hydraulic Filter', 'Rubber Track', 'Drive Belt', 'Seal Kit', 'LED Light', 'Final Drive', 'Starter Motor'],
+        'Category': ['Consumables', 'Consumables', 'Undercarriage', 'Engine', 'Repair Kits', 'Electrical', 'Power Train', 'Electrical'],
+        'Unit_Cost': [15, 28, 550, 35, 40, 70, 1200, 180],
+        'Unit_Price': [25, 45, 850, 60, 85, 120, 1950, 310],
+        'Lead_Time_Days': [5, 7, 30, 10, 5, 15, 45, 20]
+    }
+    df_parts = pd.DataFrame(parts_data)
+    df_parts['Margin'] = df_parts['Unit_Price'] - df_parts['Unit_Cost']
+    df_parts['Margin_Rate'] = (df_parts['Margin'] / df_parts['Unit_Price']) * 100
+
+    # 2. Sales History (1000 records for better trends)
+    sales_list = []
+    regions = ['North America', 'Europe', 'Asia', 'Oceania', 'South America']
+    for i in range(1, 1001):
+        part = df_parts.sample(n=1).iloc[0]
+        qty = np.random.randint(1, 10)
+        date = datetime(2025, 1, 1) + timedelta(days=np.random.randint(0, 400))
+        sales_list.append({
+            'Order_ID': f"ORD-{2000+i}",
+            'Date': date,
+            'Region': np.random.choice(regions),
+            'Part_Name': part['Part_Name'],
+            'Quantity': qty,
+            'Revenue': qty * part['Unit_Price'],
+            'Profit': qty * part['Margin']
+        })
+    df_sales = pd.DataFrame(sales_list)
+    
+    # 3. Inventory with ABC Classification
+    df_inventory = pd.DataFrame({
+        'Part_Name': df_parts['Part_Name'],
+        'Stock': [20, 50, 4, 15, 60, 12, 2, 8],
+        'Safety_Stock': [30, 40, 6, 20, 30, 10, 3, 12]
+    })
+    
+    return df_sales, df_inventory, df_parts
+
+df_sales, df_inventory, df_parts = generate_advanced_data()
+
+# --- 2. Sidebar Filters ---
+st.sidebar.header("Strategic Filters")
+date_range = st.sidebar.date_input("Date Range", [df_sales['Date'].min(), df_sales['Date'].max()])
+selected_cat = st.sidebar.multiselect("Category", df_parts['Category'].unique(), default=df_parts['Category'].unique())
+
+# Filtering logic
+mask = (df_sales['Date'].dt.date >= date_range[0]) & (df_sales['Date'].dt.date <= date_range[1])
+filtered_sales = df_sales[mask]
+
+# --- 3. Key Metrics ---
+st.title("🚜 Bobcat Strategic Aftermarket Intelligence")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total Revenue", f"${filtered_sales['Revenue'].sum():,.0f}")
+m2.metric("Gross Profit", f"${filtered_sales['Profit'].sum():,.0f}", delta=f"Avg Margin {filtered_sales['Profit'].sum()/filtered_sales['Revenue'].sum():.1%}")
+m3.metric("Total Orders", f"{filtered_sales['Order_ID'].nunique():,}")
+m4.metric("Avg Order Value", f"${filtered_sales.groupby('Order_ID')['Revenue'].sum().mean():,.0f}")
+
+st.divider()
+
+# --- 4. Advanced Dashboards ---
+tab1, tab2, tab3 = st.tabs(["📈 Sales & Profitability", "📦 Inventory & Supply Chain", "🛒 Marketing Insights"])
+
+with tab1:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Monthly Revenue Trend")
+        df_trend = filtered_sales.set_index('Date').resample('M')['Revenue'].sum().reset_index()
+        fig_trend = px.line(df_trend, x='Date', y='Revenue', markers=True, line_shape='spline', color_discrete_sequence=['#FF8C00'])
+        st.plotly_chart(fig_trend, use_container_width=True)
+        
+    with col2:
+        st.subheader("Price vs. Volume Analysis")
+        # Combining sales with part master for scatter
+        pv_data = filtered_sales.groupby('Part_Name').agg({'Quantity':'sum', 'Revenue':'sum'}).reset_index()
+        pv_data = pv_data.merge(df_parts[['Part_Name', 'Unit_Price', 'Category']], on='Part_Name')
+        fig_pv = px.scatter(pv_data, x='Unit_Price', y='Quantity', size='Revenue', color='Category', hover_name='Part_Name', text='Part_Name')
+        st.plotly_chart(fig_pv, use_container_width=True)
+
+with tab2:
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.subheader("ABC Analysis (Revenue Contribution)")
+        abc_data = filtered_sales.groupby('Part_Name')['Revenue'].sum().sort_values(ascending=False).reset_index()
+        abc_data['Cum_Percentage'] = 100 * abc_data['Revenue'].cumsum() / abc_data['Revenue'].sum()
+        abc_data['Class'] = abc_data['Cum_Percentage'].apply(lambda x: 'A' if x < 70 else ('B' if x < 90 else 'C'))
+        fig_abc = px.pie(abc_data, names='Class', values='Revenue', color='Class', 
+                         color_discrete_map={'A':'#FF8C00', 'B':'#4682B4', 'C':'#A9A9A9'})
+        st.plotly_chart(fig_abc, use_container_width=True)
+        
+    with col2:
+        st.subheader("Replenishment Urgency Matrix")
+        df_inv_merged = df_inventory.merge(df_parts[['Part_Name', 'Lead_Time_Days', 'Unit_Cost']], on='Part_Name')
+        df_inv_merged['Stock_Cover_Ratio'] = df_inv_merged['Stock'] / df_inv_merged['Safety_Stock']
+        fig_inv = px.scatter(df_inv_merged, x='Lead_Time_Days', y='Stock_Cover_Ratio', size='Unit_Cost',
+                             color='Stock_Cover_Ratio', color_continuous_scale='RdYlGn',
+                             labels={'Stock_Cover_Ratio': 'Stock/Safety Ratio'},
+                             hover_name='Part_Name')
+        fig_inv.add_hline(y=1.0, line_dash="dash", line_color="red", annotation_text="Safety Threshold")
+        st.plotly_chart(fig_inv, use_container_width=True)
+
+with tab3:
+    st.subheader("Category Profitability Heatmap")
+    cat_profit = filtered_sales.merge(df_parts[['Part_Name', 'Category']], on='Part_Name')
+    cat_profit = cat_profit.groupby(['Region', 'Category'])['Profit'].sum().unstack().fillna(0)
+    fig_heat = px.imshow(cat_profit, text_auto=True, aspect="auto", color_continuous_scale='YlOrBr')
+    st.plotly_chart(fig_heat, use_container_width=True)
