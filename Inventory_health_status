@@ -1,0 +1,145 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from mlxtend.frequent_patterns import apriori, association_rules
+from datetime import datetime, timedelta
+
+# --- Page Configuration ---
+st.set_page_config(page_title="Bobcat Aftermarket Analytics", layout="wide")
+
+# --- 1. Synthetic Data Generation ---
+@st.cache_data
+def generate_data():
+    np.random.seed(42)
+    
+    # Parts Master Data
+    parts_df = pd.DataFrame({
+        'Part_ID': ['P01', 'P02', 'P03', 'P04', 'P05', 'P06'],
+        'Part_Name': ['Engine Oil Filter', 'Hydraulic Filter', 'Rubber Track', 'Drive Belt', 'Seal Kit', 'LED Light'],
+        'Category': ['Consumables', 'Consumables', 'Undercarriage', 'Engine', 'Repair Kits', 'Electrical'],
+        'Price': [25, 45, 850, 60, 85, 120]
+    })
+    
+    # Sales History (200 Orders)
+    orders = []
+    regions = ['North America', 'Europe', 'Asia', 'Oceania']
+    for i in range(1, 201):
+        order_id = f"ORD-{1000+i}"
+        region = np.random.choice(regions)
+        # Randomly select 1-3 parts per order to simulate real buying patterns
+        selected_parts = parts_df.sample(n=np.random.randint(1, 4))
+        for _, row in selected_parts.iterrows():
+            orders.append({
+                'Order_ID': order_id,
+                'Region': region,
+                'Part_ID': row['Part_ID'],
+                'Part_Name': row['Part_Name'],
+                'Quantity': np.random.randint(1, 5),
+                'Price': row['Price'],
+                'Date': datetime(2025, 1, 1) + timedelta(days=np.random.randint(0, 365))
+            })
+    sales_df = pd.DataFrame(orders)
+    sales_df['Total'] = sales_df['Quantity'] * sales_df['Price']
+    
+    # Inventory Status
+    inventory_df = pd.DataFrame({
+        'Part_Name': parts_df['Part_Name'],
+        'Stock': [15, 45, 3, 12, 50, 8],
+        'Safety_Stock': [25, 30, 5, 10, 20, 15]
+    })
+    
+    # Return all three DataFrames to avoid NameErrors
+    return sales_df, inventory_df, parts_df
+
+# Calling the function and unpacking three variables
+df_sales, df_inventory, df_parts = generate_data()
+
+# --- 2. Sidebar Filters ---
+st.sidebar.title("Dashboard Filters")
+selected_region = st.sidebar.multiselect(
+    "Select Region", 
+    options=df_sales['Region'].unique(), 
+    default=df_sales['Region'].unique()
+)
+filtered_sales = df_sales[df_sales['Region'].isin(selected_region)]
+
+# --- 3. Main Dashboard UI ---
+st.title("🚜 Bobcat Aftermarket Parts Analytics")
+st.markdown("Optimization of **Parts Revenue & Inventory Logistics** (Telemetry-Independent)")
+
+# Top Level KPIs
+total_rev = filtered_sales['Total'].sum()
+total_orders = filtered_sales['Order_ID'].nunique()
+low_stock_items = len(df_inventory[df_inventory['Stock'] < df_inventory['Safety_Stock']])
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Revenue", f"${total_rev:,.0f}")
+col2.metric("Total Orders", f"{total_orders:,}")
+col3.metric("Stock Alerts", f"{low_stock_items} Items", delta="Action Required", delta_color="inverse")
+
+st.divider()
+
+# Visualization Section
+row1_col1, row1_col2 = st.columns(2)
+
+with row1_col1:
+    st.subheader("📍 Regional Revenue Distribution")
+    fig_pie = px.pie(filtered_sales, names='Region', values='Total', hole=0.4, 
+                     color_discrete_sequence=px.colors.sequential.YlOrBr)
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+with row1_col2:
+    st.subheader("📦 Inventory Health Status")
+    fig_stock = go.Figure()
+    fig_stock.add_trace(go.Bar(name='Current Stock', x=df_inventory['Part_Name'], y=df_inventory['Stock'], marker_color='#FF8C00'))
+    fig_stock.add_trace(go.Scatter(name='Safety Level', x=df_inventory['Part_Name'], y=df_inventory['Safety_Stock'], 
+                                   mode='lines+markers', line=dict(color='red', dash='dash')))
+    st.plotly_chart(fig_stock, use_container_width=True)
+
+# --- 4. Market Basket Analysis ---
+st.divider()
+st.subheader("🔗 Association Analysis (Market Basket)")
+st.info("Identifying parts that are frequently purchased together to optimize bundles.")
+
+# Data Transformation for Association Rules
+basket = (filtered_sales.groupby(['Order_ID', 'Part_Name'])['Quantity']
+          .sum().unstack().reset_index().fillna(0).set_index('Order_ID'))
+basket_sets = basket.applymap(lambda x: 1 if x >= 1 else 0)
+
+# Run Apriori Algorithm (Support threshold set to 7%)
+frequent_itemsets = apriori(basket_sets, min_support=0.07, use_colnames=True)
+rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.2)
+
+if not rules.empty:
+    rules['antecedents'] = rules['antecedents'].apply(lambda x: list(x)[0])
+    rules['consequents'] = rules['consequents'].apply(lambda x: list(x)[0])
+    display_rules = rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']].sort_values(by='lift', ascending=False)
+    st.dataframe(display_rules.style.background_gradient(cmap='YlOrBr'), use_container_width=True)
+else:
+    st.warning("Insufficient data patterns found for association rules.")
+
+# --- 5. Intelligent Recommendation System ---
+st.divider()
+st.subheader("💡 Smart Part Recommender")
+st.markdown("Use this tool to suggest add-ons during the dealer ordering process.")
+
+# Dropdown using the now-defined df_parts
+selected_part = st.selectbox("Select a part currently in the cart:", df_parts['Part_Name'].unique())
+
+if not rules.empty:
+    recommendations = rules[rules['antecedents'] == selected_part].sort_values(by='lift', ascending=False)
+    
+    if not recommendations.empty:
+        st.success(f"Upsell Opportunity: Customers buying **{selected_part}** also tend to buy:")
+        for _, row in recommendations.iterrows():
+            st.write(f"✅ **{row['consequents']}** (Confidence: {row['confidence']*100:.1f}%)")
+    else:
+        st.write("No specific cross-selling pattern found for this item.")
+
+# --- 6. Low Stock Action List ---
+st.divider()
+st.subheader("⚠️ Critical Replenishment List")
+critical_items = df_inventory[df_inventory['Stock'] < df_inventory['Safety_Stock']]
+st.table(critical_items)
